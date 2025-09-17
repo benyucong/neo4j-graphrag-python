@@ -1,0 +1,135 @@
+#  Copyright (c) "Neo4j"
+#  Neo4j Sweden AB [https://neo4j.com]
+#  #
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#  #
+#      https://www.apache.org/licenses/LICENSE-2.0
+#  #
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+from __future__ import annotations
+
+import os
+from typing import Any, Iterable, List, Optional, Sequence, Union, cast
+
+from pydantic import ValidationError
+
+from neo4j_graphrag.exceptions import LLMGenerationError
+from neo4j_graphrag.message_history import MessageHistory
+from neo4j_graphrag.types import LLMMessage
+
+from .base import LLMInterface
+from .rate_limit import RateLimitHandler, rate_limit_handler, async_rate_limit_handler
+from .types import (
+	BaseMessage,
+	LLMResponse,
+	MessageList,
+	SystemMessage,
+	UserMessage,
+)
+
+
+class VLLMLLM(LLMInterface):
+	"""LLM wrapper for vLLM's OpenAI-compatible server.
+
+	This implementation talks to a running vLLM HTTP server using the
+	OpenAI-compatible Chat Completions API via the official `openai` client.
+
+	Pass `base_url` and (optionally) `api_key` through kwargs, or set the
+	environment variables `VLLM_BASE_URL` and `VLLM_API_KEY`.
+
+	Example base_url: "http://localhost:8000/v1"
+	"""
+
+	def __init__(
+		self,
+		model_name: str,
+		model_params: Optional[dict[str, Any]] = None,
+		rate_limit_handler: Optional[RateLimitHandler] = None,
+		**kwargs: Any,
+	):
+		try:
+			import openai
+		except ImportError:
+			raise ImportError(
+				"""Could not import openai Python client.
+				Please install it with `pip install \"neo4j-graphrag[openai]\"`."""
+			)
+
+		super().__init__(model_name, model_params, rate_limit_handler)
+
+		base_url = cast(str, kwargs.pop("base_url", os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")))
+		api_key = cast(str, kwargs.pop("api_key", os.getenv("VLLM_API_KEY", "EMPTY")))
+
+		# Keep reference for exception types
+		self.openai = openai
+		self.client = openai.OpenAI(base_url=base_url, api_key=api_key, **kwargs)
+		self.async_client = openai.AsyncOpenAI(base_url=base_url, api_key=api_key, **kwargs)
+
+	def get_messages(
+		self,
+		input: str,
+		message_history: Optional[Union[List[LLMMessage], MessageHistory]] = None,
+		system_instruction: Optional[str] = None,
+	) -> Iterable[dict[str, Any]]:
+		messages: list[dict[str, Any]] = []
+		if system_instruction:
+			messages.append(SystemMessage(content=system_instruction).model_dump())
+		if message_history:
+			if isinstance(message_history, MessageHistory):
+				message_history = message_history.messages
+			try:
+				MessageList(messages=cast(list[BaseMessage], message_history))
+			except ValidationError as e:
+				raise LLMGenerationError(e.errors()) from e
+			messages.extend(cast(Iterable[dict[str, Any]], message_history))
+		messages.append(UserMessage(content=input).model_dump())
+		return messages
+
+	@rate_limit_handler
+	def invoke(
+		self,
+		input: str,
+		message_history: Optional[Union[List[LLMMessage], MessageHistory]] = None,
+		system_instruction: Optional[str] = None,
+	) -> LLMResponse:
+		"""Send text to vLLM and return the response content."""
+		try:
+			if isinstance(message_history, MessageHistory):
+				message_history = message_history.messages
+			response = self.client.chat.completions.create(
+				messages=self.get_messages(input, message_history, system_instruction),
+				model=self.model_name,
+				**self.model_params,
+			)
+			content = response.choices[0].message.content or ""
+			return LLMResponse(content=content)
+		except self.openai.OpenAIError as e:
+			raise LLMGenerationError(e)
+
+	@async_rate_limit_handler
+	async def ainvoke(
+		self,
+		input: str,
+		message_history: Optional[Union[List[LLMMessage], MessageHistory]] = None,
+		system_instruction: Optional[str] = None,
+	) -> LLMResponse:
+		"""Asynchronously send text to vLLM and return the response content."""
+		try:
+			if isinstance(message_history, MessageHistory):
+				message_history = message_history.messages
+			response = await self.async_client.chat.completions.create(
+				messages=self.get_messages(input, message_history, system_instruction),
+				model=self.model_name,
+				**self.model_params,
+			)
+			content = response.choices[0].message.content or ""
+			return LLMResponse(content=content)
+		except self.openai.OpenAIError as e:
+			raise LLMGenerationError(e)
+

@@ -27,6 +27,7 @@ from .rate_limit import (
 )
 from .types import LLMResponse
 from .vertexai_llm import VertexAILLM
+from .vllm import VLLMLLM
 
 __all__ = [
     "AnthropicLLM",
@@ -36,6 +37,7 @@ __all__ = [
     "OllamaLLM",
     "OpenAILLM",
     "VertexAILLM",
+    "VLLMLLM",
     "AzureOpenAILLM",
     "MistralAILLM",
     # Rate limiting components
