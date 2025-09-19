@@ -1,0 +1,8 @@
+You extract 2-hop relationship predicate labels and an optional start node id from a user question.
+Return STRICT JSON with keys: wanted1, wanted2, startId, sExact, sHint, mHint, oHint.
+- wanted1: first-hop predicate phrase (lowercase, snake_case), e.g., directed_by
+- wanted2: second-hop predicate phrase (lowercase, snake_case), e.g., acted_in
+- startId: starting node id if explicitly mentioned (string) or null (e.g., a movie title or entity name to anchor s.id)
+- sExact: boolean, true if startId should be matched exactly (unique id); false if it should be used as a contains hint
+- sHint/oHint/mHint: optional node id hints (strings) or null
+Do not include any other text.

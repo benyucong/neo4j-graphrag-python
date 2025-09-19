@@ -451,3 +451,140 @@ class FuzzyMatchResolver(BasePropertySimilarityResolver):
         # e.g., lowercase the text, strip whitespace, and remove punctuation
         # normalize the score to the 0..1 range
         return fuzz.WRatio(text_a, text_b, processor=utils.default_process) / 100.0
+
+
+class RelationshipPredicateFuzzyResolver(Component):
+    """
+    Normalize similar relationship predicate values stored in `:REL {pred: ...}` using
+    fuzzy matching, then deduplicate duplicate edges created by normalization.
+
+    This is designed for the generic ingestion model where triples are stored as:
+        (:Resource)-[:REL {pred: <original_predicate>}]->(:Resource)
+
+    Behavior:
+    - Collect distinct non-null `r.pred` values with counts
+    - Cluster similar strings using RapidFuzz `WRatio` >= `similarity_threshold`
+    - Select a canonical predicate per cluster (highest count, then shortest length)
+    - Rewrite edges from variant -> canonical
+    - Deduplicate duplicates per (start,end,canonical_pred) by deleting extras
+
+    Args:
+        driver (neo4j.Driver): Neo4j driver
+        similarity_threshold (float): Threshold in [0,1] for RapidFuzz similarity (default 0.85)
+        min_count (int): Ignore rare predicates below this count when forming clusters (default 1)
+        neo4j_database (Optional[str]): Target database name
+    """
+
+    def __init__(
+        self,
+        driver: neo4j.Driver,
+        similarity_threshold: float = 0.85,
+        min_count: int = 1,
+        neo4j_database: Optional[str] = None,
+    ) -> None:
+        if not IS_RAPIDFUZZ_INSTALLED:
+            raise ImportError(
+                "`rapidfuzz` python module needs to be installed. Install with: `pip install \"neo4j-graphrag[fuzzy-matching]\"`"
+            )
+        self.driver = driver_config.override_user_agent(driver)
+        self.similarity_threshold = similarity_threshold
+        self.min_count = max(1, int(min_count))
+        self.neo4j_database = neo4j_database
+
+    async def run(self) -> ResolutionStats:
+        # 1) Fetch distinct predicates with counts
+        records, _, _ = self.driver.execute_query(
+            """
+            MATCH ()-[r:REL]->()
+            WHERE r.pred IS NOT NULL AND r.pred <> ""
+            RETURN toString(r.pred) AS pred, count(*) AS cnt
+            """,
+            database_=self.neo4j_database,
+        )
+
+        # Filter and sort predicates by frequency (desc) for stable clustering
+        preds: list[tuple[str, int]] = [
+            (row["pred"], int(row["cnt"])) for row in records if row["pred"] is not None
+        ]
+        preds = [(p, c) for (p, c) in preds if c >= self.min_count]
+        preds.sort(key=lambda x: (-x[1], x[0]))
+
+        # 2) Greedy clustering by similarity
+        clusters: list[list[tuple[str, int]]] = []
+        for p, c in preds:
+            assigned = False
+            for cluster in clusters:
+                # Compare against cluster representative (first element)
+                rep = cluster[0][0]
+                sim = fuzz.WRatio(p, rep, processor=utils.default_process) / 100.0
+                if sim >= self.similarity_threshold:
+                    cluster.append((p, c))
+                    assigned = True
+                    break
+            if not assigned:
+                clusters.append([(p, c)])
+
+        # Build mapping: variant -> canonical
+        variant_to_canonical: dict[str, str] = {}
+        for cluster in clusters:
+            if not cluster:
+                continue
+            # Canonical = highest count; tie-break by shortest length then lexicographic
+            canonical = sorted(cluster, key=lambda pc: (-pc[1], len(pc[0]), pc[0]))[0][0]
+            for pred, _ in cluster:
+                variant_to_canonical[pred] = canonical
+
+        # 3) Rewrite edges to canonical predicates
+        rewritings = 0
+        for variant, canonical in variant_to_canonical.items():
+            if variant == canonical:
+                continue
+            result, _, _ = self.driver.execute_query(
+                """
+                MATCH ()-[r:REL {pred: $variant}]->()
+                WITH r LIMIT 100000 // batch safety
+                SET r.pred = $canonical
+                RETURN count(r) AS updated
+                """,
+                {"variant": variant, "canonical": canonical},
+                database_=self.neo4j_database,
+            )
+            rewritings += int(result[0]["updated"]) if result else 0
+
+        # 4) Deduplicate duplicates per canonical predicate
+        dedup_deleted = 0
+        canonical_set = set(variant_to_canonical.values())
+        for canonical in canonical_set:
+            # Count duplicates to report
+            dup_count_records, _, _ = self.driver.execute_query(
+                """
+                MATCH (a)-[r:REL {pred: $p}]->(b)
+                WITH a, b, count(r) AS c
+                WHERE c > 1
+                RETURN coalesce(sum(c-1), 0) AS d
+                """,
+                {"p": canonical},
+                database_=self.neo4j_database,
+            )
+            d = int(dup_count_records[0]["d"]) if dup_count_records else 0
+
+            # Delete duplicates (keep one)
+            self.driver.execute_query(
+                """
+                MATCH (a)-[r:REL {pred: $p}]->(b)
+                WITH a, b, collect(r) AS rels
+                WHERE size(rels) > 1
+                FOREACH (r IN tail(rels) | DELETE r)
+                """,
+                {"p": canonical},
+                database_=self.neo4j_database,
+            )
+            dedup_deleted += d
+
+        # Return stats (reuse ResolutionStats fields for reporting)
+        total_distinct = len(preds)
+        total_clusters = len(clusters)
+        return ResolutionStats(
+            number_of_nodes_to_resolve=total_distinct,
+            number_of_created_nodes=total_clusters,
+        )

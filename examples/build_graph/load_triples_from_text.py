@@ -101,7 +101,7 @@ def run(cfg: Config) -> None:
                     line = raw.strip()
                     if not line or line.startswith("#"):
                         continue
-                    parts = line.split("|")
+                    parts = line.split("|") 
                     if len(parts) < 3:
                         print(f"Skipping malformed line {lineno}: {line}", file=sys.stderr)
                         continue
