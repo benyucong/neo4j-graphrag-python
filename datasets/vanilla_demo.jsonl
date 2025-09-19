@@ -1,0 +1,1 @@
+{"id": 53, "question": "the scriptwriter of Alila also wrote movies?", "q_entity": "Alila", "a_entity": ["Kadosh", "Kippur", "Kedma", "Free Zone"], "path1": "common.topic.notable_types, common.topic.notable_types", "path2": "film.film_story_contributor.film_story_credits, film.film.story_by", "path3": "film.film.written_by, film.film.written_by"}

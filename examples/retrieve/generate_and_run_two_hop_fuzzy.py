@@ -45,9 +45,14 @@ def parse_args():
 def get_llm(args):
     if args.provider == "openai":
         return OpenAILLM(model_name=args.model)
+    # Configure optional per-request params for vLLM
+    model_params = {}
+    # Pass base_url and api_key as top-level kwargs per VLLMLLM constructor
     return VLLMLLM(
         model_name=args.model,
-        model_params={"base_url": args.base_url, "api_key": args.api_key},
+        model_params=model_params or None,
+        base_url=args.base_url,
+        api_key=args.api_key,
     )
 
 
@@ -55,6 +60,7 @@ def infer_predicates(llm, question: str):
     system = EXTRACT_PROMPT_PATH.read_text(encoding="utf-8")
     res = llm.invoke(question, system_instruction=system)
     text = res.content.strip()
+    print("LLM response:", text)
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:

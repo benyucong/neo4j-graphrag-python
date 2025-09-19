@@ -6,19 +6,21 @@
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="a100|h100"
 
-set -euo pipefail
+set -x
 IFS=$'\n\t'
 
-ml cuda mamba
+ml cuda gcc mamba
 
 conda activate neo4j
 
 # Configuration (override via env vars if desired)
 NEO4J_HOME=${NEO4J_HOME:-/scratch/cs/adis/yuc10/neo4j-community-5.26.0}
 WORKDIR=${WORKDIR:-/scratch/cs/adis/yuc10/neo4j-graphrag-python}
-MODEL=${MODEL:-meta-llama/Llama-2-7b}
+MODEL=${MODEL:-meta-llama/Llama-2-7b-hf}
 VLLM_HOST=${VLLM_HOST:-0.0.0.0}
 VLLM_PORT=${VLLM_PORT:-8000}
+# How many attempts (2s each) to wait for vLLM readiness
+VLLM_WAIT_TRIES=${VLLM_WAIT_TRIES:-200}
 OPENAI_API_BASE=${OPENAI_API_BASE:-http://localhost:${VLLM_PORT}/v1}
 # The OpenAI SDK needs a key even if server auth is disabled
 export OPENAI_API_KEY=${OPENAI_API_KEY:-sk-noop}
@@ -92,18 +94,34 @@ python -m vllm.entrypoints.openai.api_server \
 VLLM_PID=$!
 echo "[info] vLLM started with PID $VLLM_PID" >&2
 
-# Wait for vLLM HTTP to be ready
 echo "[info] Waiting for vLLM OpenAI API at $OPENAI_API_BASE ..." >&2
-for i in {1..60}; do
+tries=0
+while true; do
+  # If process died, abort early and show logs
+  if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+    echo "[error] vLLM process exited early (PID $VLLM_PID). Showing recent logs:" >&2
+    echo "--- logs/vllm.err (tail -n 100) ---" >&2
+    tail -n 100 logs/vllm.err >&2 || true
+    echo "--- logs/vllm.out (tail -n 50) ---" >&2
+    tail -n 50 logs/vllm.out >&2 || true
+    exit 1
+  fi
   if curl -sf "$OPENAI_API_BASE/models" >/dev/null 2>&1; then
     echo "[ok] vLLM API is up" >&2
     break
   fi
-  sleep 2
-  if [[ "$i" -eq 60 ]]; then
-    echo "[error] vLLM did not become ready in time" >&2
+  tries=$((tries+1))
+  if [[ "$tries" -ge "$VLLM_WAIT_TRIES" ]]; then
+    echo "[error] vLLM did not become ready in time. Showing recent logs:" >&2
+    echo "--- logs/vllm.err (tail -n 100) ---" >&2
+    tail -n 100 logs/vllm.err >&2 || true
+    echo "--- logs/vllm.out (tail -n 50) ---" >&2
+    tail -n 50 logs/vllm.out >&2 || true
+    echo "[hint] If you are using a gated HF model (e.g., Llama 2), ensure HUGGING_FACE_HUB_TOKEN is set." >&2
+    echo "[hint] Try an open model, e.g., export MODEL=mistralai/Mistral-7B-Instruct-v0.2" >&2
     exit 1
   fi
+  sleep 2
 done
 
 echo "[run] Generating and executing 2-hop fuzzy query" >&2
@@ -112,6 +130,7 @@ python examples/retrieve/generate_and_run_two_hop_fuzzy.py \
   --d1 3 --d2 3 --limit 25 \
   --uri "$NEO4J_URI" --user "$NEO4J_USER" --password "$NEO4J_PASSWORD" --database "$NEO4J_DATABASE" \
   --provider vllm --model "$MODEL" --base-url "$OPENAI_API_BASE" \
+  --chat-template-file /scratch/cs/adis/yuc10/neo4j-graphrag-python/metaqa/template/llama2_chat.jinja \
   || { echo "[error] Query run failed" >&2; exit 1; }
 
 echo "[done] Job completed successfully" >&2
