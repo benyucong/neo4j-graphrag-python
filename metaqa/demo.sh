@@ -9,10 +9,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# Optional: load CUDA module if available on cluster
-if command -v ml >/dev/null 2>&1; then
-  ml cuda || true
-fi
+ml cuda mamba
+
+conda activate neo4j
 
 # Configuration (override via env vars if desired)
 NEO4J_HOME=${NEO4J_HOME:-/scratch/cs/adis/yuc10/neo4j-community-5.26.0}
