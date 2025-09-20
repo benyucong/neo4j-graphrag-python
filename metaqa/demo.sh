@@ -16,7 +16,7 @@ conda activate neo4j
 # Configuration (override via env vars if desired)
 NEO4J_HOME=${NEO4J_HOME:-/scratch/cs/adis/yuc10/neo4j-community-5.26.0}
 WORKDIR=${WORKDIR:-/scratch/cs/adis/yuc10/neo4j-graphrag-python}
-MODEL=${MODEL:-meta-llama/Llama-2-7b-hf}
+MODEL=${MODEL:-rmanluo/RoG}
 VLLM_HOST=${VLLM_HOST:-0.0.0.0}
 VLLM_PORT=${VLLM_PORT:-8000}
 # How many attempts (2s each) to wait for vLLM readiness
