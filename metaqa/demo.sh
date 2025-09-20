@@ -54,7 +54,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "[info] Starting Neo4j from $NEO4J_HOME" >&2
-cd "$NEO4J_HOME"
+cd "$NEO4J_HOME" || { echo "[error] NEO4J_HOME '$NEO4J_HOME' not found" >&2; exit 1; }
 if [[ -x bin/neo4j ]]; then
   bin/neo4j start
 else
@@ -76,7 +76,7 @@ for i in {1..60}; do
 done
 
 echo "[info] Activating Python environment and launching vLLM" >&2
-cd "$WORKDIR"
+cd "$WORKDIR" || { echo "[error] WORKDIR '$WORKDIR' not found" >&2; exit 1; }
 
 # Prefer local venv if present; otherwise assume environment preconfigured
 if [[ -f .venv/bin/activate ]]; then
@@ -85,12 +85,18 @@ if [[ -f .venv/bin/activate ]]; then
 fi
 
 mkdir -p logs
-python -m vllm.entrypoints.openai.api_server \
-  --model "$MODEL" \
-  --host "$VLLM_HOST" \
-  --port "$VLLM_PORT" \
-  --dtype auto \
-  > logs/vllm.out 2> logs/vllm.err &
+VLLM_CMD=(python -m vllm.entrypoints.openai.api_server
+  --model "$MODEL"
+  --host "$VLLM_HOST"
+  --port "$VLLM_PORT"
+  --dtype auto
+  --download-dir "$HF_HOME"
+)
+if [[ -n "$VLLM_EXTRA_ARGS" ]]; then
+  # shellcheck disable=SC2206
+  VLLM_CMD+=($VLLM_EXTRA_ARGS)
+fi
+"${VLLM_CMD[@]}" > logs/vllm.out 2> logs/vllm.err &
 VLLM_PID=$!
 echo "[info] vLLM started with PID $VLLM_PID" >&2
 
@@ -124,14 +130,23 @@ while true; do
   sleep 2
 done
 
-echo "[run] Generating and executing 2-hop fuzzy query" >&2
-python examples/retrieve/generate_and_run_two_hop_fuzzy.py \
-  --question "what are the primary languages in the movies directed by David Mandel?" \
-  --d1 3 --d2 3 --limit 25 \
+echo "[run] Generating answers over dataset via merged paths" >&2
+# DATASET_PATH=${DATASET_PATH:-datasets/vanilla_paths_joined.jsonl}
+DATASET_PATH=${DATASET_PATH:-datasets/vanilla_demo.jsonl}
+OUTPUT_PATH=${OUTPUT_PATH:-outputs/answers_merged.jsonl}
+mkdir -p "$(dirname "$OUTPUT_PATH")"
+python examples/retrieve/batch_answers_from_dataset.py \
+  --input "$DATASET_PATH" \
+  --output "$OUTPUT_PATH" \
+  --aggregate min --d1 3 --d2 3 --limit 25 --normalize None --topk 10 \
+  --max-rows "${BATCH_MAX_ROWS:-50}" \
   --uri "$NEO4J_URI" --user "$NEO4J_USER" --password "$NEO4J_PASSWORD" --database "$NEO4J_DATABASE" \
-  --provider vllm --model "$MODEL" --base-url "$OPENAI_API_BASE" \
-  --chat-template-file /scratch/cs/adis/yuc10/neo4j-graphrag-python/metaqa/template/llama2_chat.jinja \
-  || { echo "[error] Query run failed" >&2; exit 1; }
+  --provider vllm --model "$MODEL" --base-url "$OPENAI_API_BASE" --api-key "$OPENAI_API_KEY" \
+  || { echo "[error] Batch answering failed" >&2; exit 1; }
 
-echo "[done] Job completed successfully" >&2
+echo "[ok] Answers written to $OUTPUT_PATH" >&2
+echo "[sample] Showing last 5 answers:" >&2
+tail -n 5 "$OUTPUT_PATH" || true
+
+
 
