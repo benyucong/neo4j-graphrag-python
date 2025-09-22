@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --time=5-00:00:00
 #SBATCH --cpus-per-task=40
-#SBATCH --partition=gpu-a100-80g,gpu-h100-80g
-#SBATCH --mem=100G
+#SBATCH --partition=gpu-h100-80g
+#SBATCH --mem=200G
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="a100|h100"
 
@@ -16,11 +16,12 @@ conda activate neo4j
 # Configuration (override via env vars if desired)
 NEO4J_HOME=${NEO4J_HOME:-/scratch/cs/adis/yuc10/neo4j-community-5.26.0}
 WORKDIR=${WORKDIR:-/scratch/cs/adis/yuc10/neo4j-graphrag-python}
-MODEL=${MODEL:-rmanluo/RoG}
+# MODEL=${MODEL:-rmanluo/RoG}
+MODEL=${MODEL:-Qwen/Qwen3-4B}
 VLLM_HOST=${VLLM_HOST:-0.0.0.0}
-VLLM_PORT=${VLLM_PORT:-8000}
+VLLM_PORT=${VLLM_PORT:-8001}
 # How many attempts (2s each) to wait for vLLM readiness
-VLLM_WAIT_TRIES=${VLLM_WAIT_TRIES:-200}
+VLLM_WAIT_TRIES=${VLLM_WAIT_TRIES:-500}
 OPENAI_API_BASE=${OPENAI_API_BASE:-http://localhost:${VLLM_PORT}/v1}
 # The OpenAI SDK needs a key even if server auth is disabled
 export OPENAI_API_KEY=${OPENAI_API_KEY:-sk-noop}
@@ -45,20 +46,31 @@ cleanup() {
     wait "$VLLM_PID" 2>/dev/null || true
   fi
   # Stop Neo4j
-  if [[ -x "$NEO4J_HOME/bin/neo4j" ]]; then
-    "$NEO4J_HOME/bin/neo4j" stop || true
+  if [[ "${NEO4J_STARTED_BY_THIS:-0}" -eq 1 ]]; then
+    if [[ -x "$NEO4J_HOME/bin/neo4j" ]]; then
+      "$NEO4J_HOME/bin/neo4j" stop || true
+    else
+      "$NEO4J_HOME/bin/neo4j-admin" server stop || true
+    fi
   else
-    "$NEO4J_HOME/bin/neo4j-admin" server stop || true
+    echo "[cleanup] leaving Neo4j running (not started by this job)" >&2
   fi
 }
 trap cleanup EXIT INT TERM
 
-echo "[info] Starting Neo4j from $NEO4J_HOME" >&2
+echo "[info] Ensuring Neo4j is running from $NEO4J_HOME" >&2
 cd "$NEO4J_HOME" || { echo "[error] NEO4J_HOME '$NEO4J_HOME' not found" >&2; exit 1; }
-if [[ -x bin/neo4j ]]; then
-  bin/neo4j start
+if "$NEO4J_HOME/bin/cypher-shell" -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" "RETURN 1;" >/dev/null 2>&1; then
+  echo "[info] Neo4j already running" >&2
+  NEO4J_STARTED_BY_THIS=0
 else
-  bin/neo4j-admin server start
+  echo "[info] Starting Neo4j..." >&2
+  if [[ -x bin/neo4j ]]; then
+    bin/neo4j start
+  else
+    bin/neo4j-admin server start
+  fi
+  NEO4J_STARTED_BY_THIS=1
 fi
 
 # Wait for Neo4j bolt port to be ready
@@ -84,7 +96,7 @@ if [[ -f .venv/bin/activate ]]; then
   source .venv/bin/activate
 fi
 
-mkdir -p logs
+mkdir -p logs_naive
 VLLM_CMD=(python -m vllm.entrypoints.openai.api_server
   --model "$MODEL"
   --host "$VLLM_HOST"
@@ -96,7 +108,7 @@ if [[ -n "$VLLM_EXTRA_ARGS" ]]; then
   # shellcheck disable=SC2206
   VLLM_CMD+=($VLLM_EXTRA_ARGS)
 fi
-"${VLLM_CMD[@]}" > logs/vllm.out 2> logs/vllm.err &
+"${VLLM_CMD[@]}" > logs_naive/vllm.out 2> logs_naive/vllm.err &
 VLLM_PID=$!
 echo "[info] vLLM started with PID $VLLM_PID" >&2
 
@@ -105,11 +117,11 @@ tries=0
 while true; do
   # If process died, abort early and show logs
   if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-    echo "[error] vLLM process exited early (PID $VLLM_PID). Showing recent logs:" >&2
-    echo "--- logs/vllm.err (tail -n 100) ---" >&2
-    tail -n 100 logs/vllm.err >&2 || true
-    echo "--- logs/vllm.out (tail -n 50) ---" >&2
-    tail -n 50 logs/vllm.out >&2 || true
+  echo "[error] vLLM process exited early (PID $VLLM_PID). Showing recent logs:" >&2
+  echo "--- logs_naive/vllm.err (tail -n 100) ---" >&2
+  tail -n 100 logs_naive/vllm.err >&2 || true
+  echo "--- logs_naive/vllm.out (tail -n 50) ---" >&2
+  tail -n 50 logs_naive/vllm.out >&2 || true
     exit 1
   fi
   if curl -sf "$OPENAI_API_BASE/models" >/dev/null 2>&1; then
@@ -118,11 +130,11 @@ while true; do
   fi
   tries=$((tries+1))
   if [[ "$tries" -ge "$VLLM_WAIT_TRIES" ]]; then
-    echo "[error] vLLM did not become ready in time. Showing recent logs:" >&2
-    echo "--- logs/vllm.err (tail -n 100) ---" >&2
-    tail -n 100 logs/vllm.err >&2 || true
-    echo "--- logs/vllm.out (tail -n 50) ---" >&2
-    tail -n 50 logs/vllm.out >&2 || true
+  echo "[error] vLLM did not become ready in time. Showing recent logs:" >&2
+  echo "--- logs_naive/vllm.err (tail -n 100) ---" >&2
+  tail -n 100 logs_naive/vllm.err >&2 || true
+  echo "--- logs_naive/vllm.out (tail -n 50) ---" >&2
+  tail -n 50 logs_naive/vllm.out >&2 || true
     echo "[hint] If you are using a gated HF model (e.g., Llama 2), ensure HUGGING_FACE_HUB_TOKEN is set." >&2
     echo "[hint] Try an open model, e.g., export MODEL=mistralai/Mistral-7B-Instruct-v0.2" >&2
     exit 1
@@ -130,16 +142,16 @@ while true; do
   sleep 2
 done
 
-echo "[run] Generating answers over dataset via merged paths" >&2
-# DATASET_PATH=${DATASET_PATH:-datasets/vanilla_paths_joined.jsonl}
-DATASET_PATH=${DATASET_PATH:-datasets/vanilla_demo.jsonl}
-OUTPUT_PATH=${OUTPUT_PATH:-outputs/answers_merged.jsonl}
+echo "[run] Generating answers over dataset via sequential 3-path queries" >&2
+DATASET_PATH=${DATASET_PATH:-datasets/vanilla_paths_joined.jsonl}
+# DATASET_PATH=${DATASET_PATH:-datasets/vanilla_demo.jsonl}
+OUTPUT_PATH=${OUTPUT_PATH:-outputs/answers_merged_naive.jsonl}
 mkdir -p "$(dirname "$OUTPUT_PATH")"
-python examples/retrieve/batch_answers_from_dataset.py \
+python examples/retrieve/batch_answers_from_dataset_seq.py \
   --input "$DATASET_PATH" \
   --output "$OUTPUT_PATH" \
-  --aggregate min --d1 3 --d2 3 --limit 25 --normalize None --topk 10 \
-  --max-rows "${BATCH_MAX_ROWS:-50}" \
+  --aggregate min --d1 60 --d2 60 --limit 0 --normalize none --topk 1000000 \
+  --max-rows "${BATCH_MAX_ROWS:-0}" \
   --uri "$NEO4J_URI" --user "$NEO4J_USER" --password "$NEO4J_PASSWORD" --database "$NEO4J_DATABASE" \
   --provider vllm --model "$MODEL" --base-url "$OPENAI_API_BASE" --api-key "$OPENAI_API_KEY" \
   || { echo "[error] Batch answering failed" >&2; exit 1; }
@@ -147,6 +159,13 @@ python examples/retrieve/batch_answers_from_dataset.py \
 echo "[ok] Answers written to $OUTPUT_PATH" >&2
 echo "[sample] Showing last 5 answers:" >&2
 tail -n 5 "$OUTPUT_PATH" || true
+
+# Show throughput metrics if available
+METRICS_PATH="${OUTPUT_PATH}.metrics.json"
+if [[ -f "$METRICS_PATH" ]]; then
+  echo "[metrics] Summary:" >&2
+  jq '{rows_processed, elapsed_seconds, throughput_rows_per_sec} // .' "$METRICS_PATH" 2>/dev/null || cat "$METRICS_PATH" || true
+fi
 
 
 

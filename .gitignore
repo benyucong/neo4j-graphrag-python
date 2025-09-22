@@ -12,3 +12,7 @@ docs/build/
 .DS_Store
 .venv
 .tox/
+logs/
+outputs/
+logs_sharp/
+*.out
