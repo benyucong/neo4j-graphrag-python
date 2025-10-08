@@ -12,7 +12,8 @@ docs/build/
 .DS_Store
 .venv
 .tox/
-logs/
-outputs/
+logs*/
+outputs*/
+random_*/
 logs_sharp/
 *.out

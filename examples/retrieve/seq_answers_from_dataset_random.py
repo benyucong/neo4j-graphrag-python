@@ -25,7 +25,7 @@ def parse_args():
     p.add_argument("--d1", type=int, default=3)
     p.add_argument("--d2", type=int, default=3)
     p.add_argument("--limit", type=int, default=25)
-    p.add_argument("--normalize", choices=["none", "simple", "heavy"], default="none")
+    p.add_argument("--normalize", choices=["none", "simple", "heavy"], default="simple")
     p.add_argument("--topk", type=int, default=10, help="Max evidence rows to include in prompt")
     p.add_argument("--prompt-style", choices=["llama-inst", "chat-json"], default="llama-inst")
     p.add_argument("--uri", default="neo4j://localhost:7687")
@@ -84,11 +84,13 @@ def run_query(
         f"WITH s, r1, m, r2, o, {p1_expr} AS np1, {p2_expr} AS np2, nw1, nw2\n"
         "WITH s, r1, m, r2, o, apoc.text.distance(np1, nw1) AS d1, apoc.text.distance(np2, nw2) AS d2\n"
         "WHERE d1 <= $d1 AND d2 <= $d2\n"
-        "RETURN s.id AS s, r1.pred AS p1, m.id AS m, r2.pred AS p2, o.id AS o, d1 AS d1, d2 AS d2, (d1 + d2) AS score\n"
-        "ORDER BY score ASC\n"
+        "WITH s, r1, m, r2, o, d1, d2, (d1 + d2) AS score\n"
+        "ORDER BY rand()\n"
     )
     if limit and limit > 0:
-        qry += "LIMIT $limit"
+        qry += "LIMIT $limit\n"
+    
+    qry += "RETURN s.id AS s, r1.pred AS p1, m.id AS m, r2.pred AS p2, o.id AS o, d1, d2, score"
 
     recs, _, _ = driver.execute_query(
         qry,
@@ -103,6 +105,7 @@ def run_query(
         database_=db,
     )
     return recs
+
 
 
 def get_llm(args):
@@ -227,7 +230,7 @@ def main():
                 if not pairs:
                     items.append({
                         "id": rid, "question": question, "q_entity": q_entity,
-                        "pairs": pairs, "neo4j_time_us": 0, "skip_llm": True
+                        "pairs": pairs, "neo4j_time_ms": 0, "skip_llm": True
                     })
                     done += 1
                     continue
@@ -254,13 +257,13 @@ def main():
                         recs = []
                     rows_by_path[labels[i]] = recs
 
-                neo4j_time_us = int((perf_counter() - t_q0) * 1_000_000)
+                neo4j_time_ms = int((perf_counter() - t_q0) * 1000)
 
                 evidence_all = aggregate_rows(rows_by_path, args.aggregate)
                 if not evidence_all:
                     items.append({
                         "id": rid, "question": question, "q_entity": q_entity,
-                        "pairs": pairs, "neo4j_time_us": neo4j_time_us, "skip_llm": True
+                        "pairs": pairs, "neo4j_time_ms": neo4j_time_ms, "skip_llm": True
                     })
                     done += 1
                     continue
@@ -273,7 +276,7 @@ def main():
 
                 items.append({
                     "id": rid, "question": question, "q_entity": q_entity,
-                    "pairs": pairs, "neo4j_time_us": neo4j_time_us,
+                    "pairs": pairs, "neo4j_time_ms": neo4j_time_ms,
                     "prompt": prompt, "skip_llm": False
                 })
                 done += 1
@@ -283,7 +286,7 @@ def main():
     # LLM fan-out (concurrent)
     def llm_task(index: int, item: dict):
         if item.get("skip_llm"):
-            return index, {"answer": [], "llm_time_us": 0}
+            return index, {"answer": [], "llm_time_ms": 0}
         prompt = item["prompt"]
         rid = item.get("id")
         print(f"\n[Prompt to LLM][id={rid}]:\n{prompt}")
@@ -292,9 +295,9 @@ def main():
             resp = llm.invoke(prompt)
             raw = resp.content.strip()
             ans = extract_answer_list(raw)
-            return index, {"answer": ans, "llm_time_us": int((perf_counter() - t0) * 1_000_000)}
+            return index, {"answer": ans, "llm_time_ms": int((perf_counter() - t0) * 1000)}
         except Exception as e:
-            return index, {"answer": [f"llm_error: {e}"], "llm_time_us": int((perf_counter() - t0) * 1_000_000)}
+            return index, {"answer": [f"llm_error: {e}"], "llm_time_ms": int((perf_counter() - t0) * 1000)}
 
     llm_results: List[Optional[dict]] = [None] * len(items)
     with ThreadPoolExecutor(max_workers=max(1, int(args.llm_concurrency))) as ex:
@@ -305,7 +308,7 @@ def main():
 
     for i in range(len(llm_results)):
         if llm_results[i] is None:
-            llm_results[i] = {"answer": [], "llm_time_us": 0}
+            llm_results[i] = {"answer": [], "llm_time_ms": 0}
 
     # Write outputs in order
     with outp.open("w", encoding="utf-8") as f_out:
@@ -314,15 +317,15 @@ def main():
                 out = {
                     "id": item["id"], "question": item["question"], "q_entity": item["q_entity"],
                     "paths": item["pairs"], "answer": [], "no_evidence": True,
-                    "neo4j_time_us": item["neo4j_time_us"], "llm_time_us": 0
+                    "neo4j_time_ms": item["neo4j_time_ms"], "llm_time_ms": 0
                 }
             else:
                 out = {
                     "id": item["id"], "question": item["question"], "q_entity": item["q_entity"],
                     "paths": item["pairs"],
                     "answer": llm_results[i]["answer"],
-                    "neo4j_time_us": item["neo4j_time_us"],
-                    "llm_time_us": llm_results[i]["llm_time_us"]
+                    "neo4j_time_ms": item["neo4j_time_ms"],
+                    "llm_time_ms": llm_results[i]["llm_time_ms"]
                 }
             f_out.write(json.dumps(out, ensure_ascii=False) + "\n")
 

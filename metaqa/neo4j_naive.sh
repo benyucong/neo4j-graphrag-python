@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #SBATCH --time=5-00:00:00
 #SBATCH --cpus-per-task=40
-#SBATCH --partition=gpu-h100-80g
+#SBATCH --partition=gpu-h200-141g-ellis
 #SBATCH --mem=200G
 #SBATCH --gres=gpu:1
-#SBATCH --constraint="a100|h100"
+##SBATCH --constraint="a100|h100"
 
 set -x
 IFS=$'\n\t'
@@ -150,7 +150,7 @@ mkdir -p "$(dirname "$OUTPUT_PATH")"
 python examples/retrieve/batch_answers_from_dataset_seq.py \
   --input "$DATASET_PATH" \
   --output "$OUTPUT_PATH" \
-  --aggregate min --d1 60 --d2 60 --limit 0 --normalize none --topk 1000000 \
+  --aggregate min --d1 150 --d2 150 --limit 0 --normalize none --topk 1000000 \
   --max-rows "${BATCH_MAX_ROWS:-0}" \
   --uri "$NEO4J_URI" --user "$NEO4J_USER" --password "$NEO4J_PASSWORD" --database "$NEO4J_DATABASE" \
   --provider vllm --model "$MODEL" --base-url "$OPENAI_API_BASE" --api-key "$OPENAI_API_KEY" \

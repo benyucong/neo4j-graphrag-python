@@ -72,12 +72,12 @@ def run_query_merged(
         w1a_expr = "toLower($w1a)"; w2a_expr = "toLower($w2a)"
         w1b_expr = "toLower($w1b)"; w2b_expr = "toLower($w2b)"
         w1c_expr = "toLower($w1c)"; w2c_expr = "toLower($w2c)"
-        p1_expr = "toLower(r1.pred)"; p2_expr = "toLower(r2.pred)"
+        p1_expr  = "toLower(r1.pred)"; p2_expr = "toLower(r2.pred)"
     elif normalize == "simple":
         w1a_expr = "apoc.text.replace(toLower($w1a),'_','')"; w2a_expr = "apoc.text.replace(toLower($w2a),'_','')"
         w1b_expr = "apoc.text.replace(toLower($w1b),'_','')"; w2b_expr = "apoc.text.replace(toLower($w2b),'_','')"
         w1c_expr = "apoc.text.replace(toLower($w1c),'_','')"; w2c_expr = "apoc.text.replace(toLower($w2c),'_','')"
-        p1_expr = "apoc.text.replace(toLower(r1.pred),'_','')"; p2_expr = "apoc.text.replace(toLower(r2.pred),'_','')"
+        p1_expr  = "apoc.text.replace(toLower(r1.pred),'_','')"; p2_expr = "apoc.text.replace(toLower(r2.pred),'_','')"
     else:
         def heavy(arg: str) -> str:
             return (
@@ -86,37 +86,75 @@ def run_query_merged(
         w1a_expr = heavy("$w1a"); w2a_expr = heavy("$w2a")
         w1b_expr = heavy("$w1b"); w2b_expr = heavy("$w2b")
         w1c_expr = heavy("$w1c"); w2c_expr = heavy("$w2c")
-        p1_expr = "apoc.text.replace(apoc.text.replace(apoc.text.replace(toLower(r1.pred),'_',''),'.',''),'/','')"
-        p2_expr = "apoc.text.replace(apoc.text.replace(apoc.text.replace(toLower(r2.pred),'_',''),'.',''),'/','')"
+        p1_expr  = "apoc.text.replace(apoc.text.replace(apoc.text.replace(toLower(r1.pred),'_',''),'.',''),'/','')"
+        p2_expr  = "apoc.text.replace(apoc.text.replace(apoc.text.replace(toLower(r2.pred),'_',''),'.',''),'/','')"
 
-    qry = (
-        f"WITH {w1a_expr} AS w1a, {w2a_expr} AS w2a, {w1b_expr} AS w1b, {w2b_expr} AS w2b, {w1c_expr} AS w1c, {w2c_expr} AS w2c\n"
-        "MATCH (s:Resource {id: $startId})-[r1:REL]-(m:Resource)-[r2:REL]-(o:Resource)\n"
-        f"WITH s, r1, m, r2, o, {p1_expr} AS np1, {p2_expr} AS np2, w1a, w2a, w1b, w2b, w1c, w2c\n"
-        "WITH s, r1, m, r2, o,\n"
-        "  CASE WHEN $hasA THEN apoc.text.distance(np1, w1a) ELSE NULL END AS a1,\n"
-        "  CASE WHEN $hasA THEN apoc.text.distance(np2, w2a) ELSE NULL END AS a2,\n"
-        "  CASE WHEN $hasB THEN apoc.text.distance(np1, w1b) ELSE NULL END AS b1,\n"
-        "  CASE WHEN $hasB THEN apoc.text.distance(np2, w2b) ELSE NULL END AS b2,\n"
-        "  CASE WHEN $hasC THEN apoc.text.distance(np1, w1c) ELSE NULL END AS c1,\n"
-        "  CASE WHEN $hasC THEN apoc.text.distance(np2, w2c) ELSE NULL END AS c2\n"
-        "WITH s, r1, m, r2, o, a1, a2, b1, b2, c1, c2,\n"
-        "  CASE WHEN a1 IS NULL OR a2 IS NULL THEN NULL ELSE a1 + a2 END AS scoreA,\n"
-        "  CASE WHEN b1 IS NULL OR b2 IS NULL THEN NULL ELSE b1 + b2 END AS scoreB,\n"
-        "  CASE WHEN c1 IS NULL OR c2 IS NULL THEN NULL ELSE c1 + c2 END AS scoreC\n"
-        "WITH s, r1, m, r2, o, scoreA, scoreB, scoreC, [x IN [scoreA, scoreB, scoreC] WHERE x IS NOT NULL] AS scores\n"
-        "WHERE (( $hasA AND a1 IS NOT NULL AND a2 IS NOT NULL AND a1 <= $d1 AND a2 <= $d2) OR\n"
-        "       ( $hasB AND b1 IS NOT NULL AND b2 IS NOT NULL AND b1 <= $d1 AND b2 <= $d2) OR\n"
-        "       ( $hasC AND c1 IS NOT NULL AND c2 IS NOT NULL AND c1 <= $d1 AND c2 <= $d2))\n"
-        "WITH s, r1, m, r2, o, scoreA, scoreB, scoreC, scores,\n"
-        "  CASE $aggregate WHEN 'sum' THEN reduce(acc=0, x IN scores | acc + x)\n"
-        "                  WHEN 'avg' THEN (reduce(acc=0, x IN scores | acc + x) / toFloat(size(scores)))\n"
-        "                  ELSE reduce(minVal=1000000000, x IN scores | CASE WHEN x < minVal THEN x ELSE minVal END) END AS score\n"
-        "RETURN s.id AS s, r1.pred AS p1, m.id AS m, r2.pred AS p2, o.id AS o, scoreA, scoreB, scoreC, score\n"
-        "ORDER BY score ASC\n"
-    )
-    if limit and limit > 0:
-        qry = qry + "LIMIT $limit"
+    qry = f"""
+    // Precompute normalized keywords once at top level
+    WITH
+      {w1a_expr} AS w1a, {w2a_expr} AS w2a,
+      {w1b_expr} AS w1b, {w2b_expr} AS w2b,
+      {w1c_expr} AS w1c, {w2c_expr} AS w2c
+    MATCH (s:Resource {{id: $startId}})
+
+    // ---------- First hop: s -[r1]- m (global prune to top $d1) ----------
+    CALL {{
+      WITH s, w1a, w1b, w1c   // import ONLY variables, no aliasing/params
+      MATCH (s)-[r1:REL]-(m:Resource)
+      WITH r1, m, {p1_expr} AS np1, w1a, w1b, w1c
+      WITH r1, m,
+           CASE WHEN $hasA THEN apoc.text.distance(np1, w1a) ELSE NULL END AS a1,
+           CASE WHEN $hasB THEN apoc.text.distance(np1, w1b) ELSE NULL END AS b1,
+           CASE WHEN $hasC THEN apoc.text.distance(np1, w1c) ELSE NULL END AS c1
+      WHERE ( ($hasA AND a1 IS NOT NULL AND a1 <= $d1)
+           OR ($hasB AND b1 IS NOT NULL AND b1 <= $d1)
+           OR ($hasC AND c1 IS NOT NULL AND c1 <= $d1) )
+      WITH r1, m, a1, b1, c1,
+           reduce(minv=1e9, x IN [a1,b1,c1] | CASE WHEN x IS NULL OR x>minv THEN minv ELSE x END) AS rank1
+      ORDER BY rank1 ASC
+      LIMIT $d1
+      RETURN r1, m, a1, b1, c1
+    }}
+
+    // ---------- Second hop: m -[r2]- o (per-m prune to top $d2) ----------
+    CALL {{
+      WITH m, w2a, w2b, w2c   // import ONLY variables; use params directly
+      MATCH (m)-[r2:REL]-(o:Resource)
+      WITH r2, o, {p2_expr} AS np2, w2a, w2b, w2c
+      WITH r2, o,
+           CASE WHEN $hasA THEN apoc.text.distance(np2, w2a) ELSE NULL END AS a2,
+           CASE WHEN $hasB THEN apoc.text.distance(np2, w2b) ELSE NULL END AS b2,
+           CASE WHEN $hasC THEN apoc.text.distance(np2, w2c) ELSE NULL END AS c2
+      WHERE ( ($hasA AND a2 IS NOT NULL AND a2 <= $d2)
+           OR ($hasB AND b2 IS NOT NULL AND b2 <= $d2)
+           OR ($hasC AND c2 IS NOT NULL AND c2 <= $d2) )
+      WITH r2, o, a2, b2, c2,
+           reduce(minv=1e9, x IN [a2,b2,c2] | CASE WHEN x IS NULL OR x>minv THEN minv ELSE x END) AS rank2
+      ORDER BY rank2 ASC
+      LIMIT $d2
+      RETURN r2, o, a2, b2, c2
+    }}
+
+    // ---------- Combine hops and score ----------
+    WITH s, r1, m, r2, o,
+         a1, b1, c1, a2, b2, c2,
+         CASE WHEN $hasA AND a1 IS NOT NULL AND a2 IS NOT NULL THEN a1 + a2 ELSE NULL END AS scoreA,
+         CASE WHEN $hasB AND b1 IS NOT NULL AND b2 IS NOT NULL THEN b1 + b2 ELSE NULL END AS scoreB,
+         CASE WHEN $hasC AND c1 IS NOT NULL AND c2 IS NOT NULL THEN c1 + c2 ELSE NULL END AS scoreC
+    WITH s, r1, m, r2, o, scoreA, scoreB, scoreC,
+         [x IN [scoreA, scoreB, scoreC] WHERE x IS NOT NULL] AS scores
+
+    WITH s, r1, m, r2, o, scoreA, scoreB, scoreC, scores,
+         CASE $aggregate
+           WHEN 'sum' THEN reduce(acc=0.0, x IN scores | acc + x)
+           WHEN 'avg' THEN (reduce(acc=0.0, x IN scores | acc + x) / toFloat(size(scores)))
+           ELSE reduce(minVal=1e9, x IN scores | CASE WHEN x < minVal THEN x ELSE minVal END)
+         END AS score
+
+    RETURN s.id AS s, r1.pred AS p1, m.id AS m, r2.pred AS p2, o.id AS o, scoreA, scoreB, scoreC, score
+    ORDER BY score ASC
+    {"LIMIT $limit" if limit and limit > 0 else ""}
+    """
 
     recs, _, _ = driver.execute_query(
         qry,
@@ -126,12 +164,13 @@ def run_query_merged(
             "w1b": w1b or "", "w2b": w2b or "",
             "w1c": w1c or "", "w2c": w2c or "",
             "hasA": hasA, "hasB": hasB, "hasC": hasC,
-            "d1": d1_max, "d2": d2_max, "limit": limit,
+            "d1": int(d1_max), "d2": int(d2_max), "limit": int(limit or 0),
             "aggregate": aggregate,
         },
         database_=db,
     )
     return recs
+
 
 
 def get_llm(args):
@@ -237,12 +276,12 @@ def main():
                             args.d1, args.d2, args.limit, args.normalize, args.aggregate
                         )
                     )
-                    neo4j_time_ms = int((perf_counter() - t_q0) * 1000)
+                    neo4j_time_us = int((perf_counter() - t_q0) * 1_000_000)
                 except Exception as e:
-                    neo4j_time_ms = int((perf_counter() - t_q0) * 1000)
+                    neo4j_time_us = int((perf_counter() - t_q0) * 1_000_000)
                     items.append({
                         "id": rid, "question": question, "q_entity": q_entity,
-                        "pairs": pairs, "error": str(e), "neo4j_time_ms": neo4j_time_ms
+                        "pairs": pairs, "error": str(e), "neo4j_time_us": neo4j_time_us
                     })
                     done += 1
                     continue
@@ -250,7 +289,7 @@ def main():
                 if not evidence:
                     items.append({
                         "id": rid, "question": question, "q_entity": q_entity,
-                        "pairs": pairs, "skip_llm": True, "neo4j_time_ms": neo4j_time_ms
+                        "pairs": pairs, "skip_llm": True, "neo4j_time_us": neo4j_time_us
                     })
                     done += 1
                     continue
@@ -264,7 +303,7 @@ def main():
 
                 items.append({
                     "id": rid, "question": question, "q_entity": q_entity,
-                    "pairs": pairs, "prompt": prompt, "neo4j_time_ms": neo4j_time_ms
+                    "pairs": pairs, "prompt": prompt, "neo4j_time_us": neo4j_time_us
                 })
                 done += 1
     finally:
@@ -273,7 +312,7 @@ def main():
     # Stage 2: run LLM concurrently where needed
     def llm_task(index: int, item: dict):
         if item.get("skip_llm") or "prompt" not in item:
-            return index, {"answer": [], "llm_time_ms": 0}
+            return index, {"answer": [], "llm_time_us": 0}
         prompt = item["prompt"]
         rid = item.get("id")
         print(f"\n[Prompt to LLM][id={rid}]:\n{prompt}")
@@ -283,9 +322,9 @@ def main():
             raw = resp.content.strip()
             print("[LLM raw]:", raw)
             ans = extract_answer_list(raw)
-            return index, {"answer": ans, "llm_time_ms": int((perf_counter() - t0) * 1000)}
+            return index, {"answer": ans, "llm_time_us": int((perf_counter() - t0) * 1_000_000)}
         except Exception as e:
-            return index, {"answer": [f"llm_error: {e}"], "llm_time_ms": int((perf_counter() - t0) * 1000)}
+            return index, {"answer": [f"llm_error: {e}"], "llm_time_us": int((perf_counter() - t0) * 1_000_000)}
 
     llm_results: List[Optional[dict]] = [None] * len(items)
     with ThreadPoolExecutor(max_workers=max(1, int(args.llm_concurrency))) as ex:
@@ -296,7 +335,7 @@ def main():
 
     for i in range(len(llm_results)):
         if llm_results[i] is None:
-            llm_results[i] = {"answer": [], "llm_time_ms": 0}
+            llm_results[i] = {"answer": [], "llm_time_us": 0}
 
     # Stage 3: write outputs in order
     with outp.open("w", encoding="utf-8") as f_out:
@@ -304,7 +343,7 @@ def main():
             if "error" in item:
                 out = {
                     "id": item["id"], "question": item["question"], "q_entity": item["q_entity"],
-                    "paths": item["pairs"], "error": item["error"], "neo4j_time_ms": item["neo4j_time_ms"]
+                    "paths": item["pairs"], "error": item["error"], "neo4j_time_us": item["neo4j_time_us"]
                 }
                 f_out.write(json.dumps(out, ensure_ascii=False) + "\n")
                 continue
@@ -314,7 +353,7 @@ def main():
                     "id": item["id"], "question": item["question"], "q_entity": item["q_entity"],
                     "paths": item["pairs"], "answer": [],
                     "no_evidence": True,
-                    "neo4j_time_ms": item["neo4j_time_ms"], "llm_time_ms": 0
+                    "neo4j_time_us": item["neo4j_time_us"], "llm_time_us": 0
                 }
                 f_out.write(json.dumps(out, ensure_ascii=False) + "\n")
                 continue
@@ -323,7 +362,7 @@ def main():
             out = {
                 "id": item["id"], "question": item["question"], "q_entity": item["q_entity"],
                 "paths": item["pairs"], "answer": llm_res["answer"],
-                "neo4j_time_ms": item["neo4j_time_ms"], "llm_time_ms": llm_res["llm_time_ms"]
+                "neo4j_time_us": item["neo4j_time_us"], "llm_time_us": llm_res["llm_time_us"]
             }
             f_out.write(json.dumps(out, ensure_ascii=False) + "\n")
 
