@@ -125,15 +125,24 @@ def main() -> None:
         except Exception:
             continue
 
-        # timings
+        # timings (support both _us and _ms fields)
+        neo_us = rec.get("neo4j_time_us")
         neo_ms = rec.get("neo4j_time_ms")
+        llm_us = rec.get("llm_time_us")
         llm_ms = rec.get("llm_time_ms")
-        if isinstance(neo_ms, (int, float)) and neo_ms > 0:
+        
+        # Convert microseconds to milliseconds if present, else use milliseconds
+        if neo_us is not None and isinstance(neo_us, (int, float)) and neo_us > 0:
+            neo4j_times.append(float(neo_us) / 1000.0)
+        elif isinstance(neo_ms, (int, float)) and neo_ms > 0:
             neo4j_times.append(float(neo_ms))
         else:
-            # differentiate truly skipped queries (neo4j_time_ms==0 & maybe no_evidence)
+            # differentiate truly skipped queries (neo4j_time==0 & maybe no_evidence)
             no_query_rows += 1
-        if isinstance(llm_ms, (int, float)) and llm_ms > 0:
+            
+        if llm_us is not None and isinstance(llm_us, (int, float)) and llm_us > 0:
+            llm_times.append(float(llm_us) / 1000.0)
+        elif isinstance(llm_ms, (int, float)) and llm_ms > 0:
             llm_times.append(float(llm_ms))
 
         gold_list = gold_index.get(rid)
@@ -171,12 +180,12 @@ def main() -> None:
     timings = {
         "neo4j_avg_ms": (sum(neo4j_times) / len(neo4j_times)) if neo4j_times else 0.0,
         "neo4j_median_ms": statistics.median(neo4j_times) if neo4j_times else 0.0,
-        "neo4j_p95_ms": percentile(neo4j_times, 95) if neo4j_times else 0.0,
+        "neo4j_p90_ms": percentile(neo4j_times, 90) if neo4j_times else 0.0,
         "neo4j_samples": len(neo4j_times),
         "neo4j_skipped_or_zero": no_query_rows,
         "llm_avg_ms": (sum(llm_times) / len(llm_times)) if llm_times else 0.0,
         "llm_median_ms": statistics.median(llm_times) if llm_times else 0.0,
-        "llm_p95_ms": percentile(llm_times, 95) if llm_times else 0.0,
+        "llm_p90_ms": percentile(llm_times, 90) if llm_times else 0.0,
         "llm_samples": len(llm_times),
     }
 

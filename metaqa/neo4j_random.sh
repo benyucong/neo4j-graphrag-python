@@ -30,6 +30,26 @@ NEO4J_USER=${NEO4J_USER:-neo4j}
 NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
 NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
 
+# Sweep config
+DATASET_PATH=${DATASET_PATH:-datasets/vanilla_paths_joined.jsonl}
+BASE_OUTPUT_DIR=${BASE_OUTPUT_DIR:-random_outputs}
+mkdir -p "$BASE_OUTPUT_DIR"
+
+# -------- Linear budget controls ----------
+# Work budget W(L) ~= K * L ; then d1 ~ sqrt(W), d2 ~ W/d1
+# Tune K once: larger K => steeper (but still smooth) curve.
+K=${K:-64}
+# Keep prompt size steady to avoid LLM-time step jumps
+TOPK_FIXED=${TOPK_FIXED:-25}
+# Optional hard cap on d1/d2 (keeps extremes in check)
+D1_MAX=${D1_MAX:-1000}
+D2_MAX=${D2_MAX:-1000}
+
+# Limits to sweep (same as sharp)
+ALL_LIMITS=()
+for L in $(seq 1 15); do ALL_LIMITS+=("$L"); done
+ALL_LIMITS+=(16 20 25 30 50 100)
+
 # ----------------- Cleanup -----------------
 cleanup() {
   echo "[cleanup] stopping services..." >&2
@@ -105,29 +125,44 @@ while true; do
   sleep 2
 done
 
-# ----------------- Run batch (merged loop with global aggregate/normalize) -----------------
-DATASET_PATH=${DATASET_PATH:-datasets/vanilla_paths_joined.jsonl}
-BASE_OUTPUT_DIR=${BASE_OUTPUT_DIR:-random_outputs}
-mkdir -p "$BASE_OUTPUT_DIR"
+# -------- helper: compute d1,d2 from linear budget --------
+calc_d1_d2() {
+  local L="$1" K="$2" D1_MAX="$3" D2_MAX="$4"
+  python - "$L" "$K" "$D1_MAX" "$D2_MAX" <<'PY'
+import math, sys
+L      = int(sys.argv[1])
+K      = int(sys.argv[2])
+D1_MAX = int(sys.argv[3])
+D2_MAX = int(sys.argv[4])
+W = max(1, K*L)
+d1 = max(1, int(math.sqrt(W)))
+d2 = max(1, W // d1)
+d1 = min(d1, D1_MAX)
+d2 = min(d2, D2_MAX)
+print(d1)   # line 1
+print(d2)   # line 2
+print(W)    # line 3
+PY
+}
 
-LIMITS=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 20 25 30 50 100)
+# ----------------- Run batch -----------------
+echo "[run] Linear-budget sweep with K=${K}; fixed TOPK=${TOPK_FIXED}; limits: 1-15 plus 16 20 25 30 50 100" >&2
 
-for L in "${LIMITS[@]}"; do
-  # Determine D1/D2 scaling
-  if   (( L <= 1 )); then D1=8;  D2=16
-  elif (( L == 2 )); then D1=12; D2=24
-  elif (( L == 3 )); then D1=16; D2=32
-  elif (( L <= 5 )); then D1=20; D2=40
-  elif (( L <= 8 )); then D1=28; D2=56
-  elif (( L <= 12 )); then D1=34; D2=60
-  elif (( L <= 20 )); then D1=40; D2=60
-  elif (( L <= 30 )); then D1=50; D2=70
-  elif (( L <= 50 )); then D1=60; D2=80
-  else D1=70; D2=80
+for L in "${ALL_LIMITS[@]}"; do
+  # derive d1,d2 from linear budget
+  readarray -t _nums < <(calc_d1_d2 "$L" "$K" "$D1_MAX" "$D2_MAX")
+  D1="${_nums[0]}"
+  D2="${_nums[1]}"
+  W="${_nums[2]}"
+
+  run_prefix="[run]"; ok_prefix="[ok]"; metrics_prefix="[metrics]"; error_prefix="[error]"
+  if (( L > 15 )); then
+    run_prefix="[run][high]"; ok_prefix="[ok][high]"
+    metrics_prefix="[metrics][high]"; error_prefix="[error][high]"
   fi
 
   OUTPUT_PATH="${BASE_OUTPUT_DIR}/answers_sequential_random_limit${L}.jsonl"
-  echo "[run] limit=${L}, d1=${D1}, d2=${D2} -> $OUTPUT_PATH" >&2
+  echo "${run_prefix} limit=${L}, d1=${D1}, d2=${D2}, W~${W} -> ${OUTPUT_PATH}" >&2
 
   python examples/retrieve/batch_answers_from_dataset_random.py \
     --input "$DATASET_PATH" \
@@ -137,18 +172,21 @@ for L in "${LIMITS[@]}"; do
     --d1 "${D1}" \
     --d2 "${D2}" \
     --limit "$L" \
-    --topk "$L" \
+    --topk "$TOPK_FIXED" \
     --max-rows "${BATCH_MAX_ROWS:-0}" \
     --uri "$NEO4J_URI" --user "$NEO4J_USER" --password "$NEO4J_PASSWORD" --database "$NEO4J_DATABASE" \
     --provider vllm --model "$MODEL" --base-url "$OPENAI_API_BASE" --api-key "$OPENAI_API_KEY" \
-    || { echo "[error] Batch failed for limit=$L" >&2; exit 1; }
+    || { echo "${error_prefix} Batch failed for limit=$L" >&2; exit 1; }
 
-  echo "[ok] Answers written to $OUTPUT_PATH" >&2
+  echo "${ok_prefix} Answers written to $OUTPUT_PATH" >&2
+  echo "[sample] (limit=$L) Last 3:" >&2
   tail -n 3 "$OUTPUT_PATH" || true
 
   METRICS_PATH="${OUTPUT_PATH}.metrics.json"
   if [[ -f "$METRICS_PATH" ]]; then
-    echo "[metrics] (limit=$L) Summary:" >&2
+    echo "${metrics_prefix} (limit=$L) Summary:" >&2
     jq '{rows_processed, elapsed_seconds, throughput_rows_per_sec} // .' "$METRICS_PATH" 2>/dev/null || cat "$METRICS_PATH" || true
   fi
 done
+
+echo "[done] Linear-budget sweep complete" >&2

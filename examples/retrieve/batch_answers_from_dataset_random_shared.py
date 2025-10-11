@@ -90,7 +90,7 @@ def run_query_merged(
         p1_expr  = "apoc.text.replace(apoc.text.replace(apoc.text.replace(toLower(r1.pred),'_',''),'.',''),'/','')"
         p2_expr  = "apoc.text.replace(apoc.text.replace(apoc.text.replace(toLower(r2.pred),'_',''),'.',''),'/','')"
 
-    # NOTE: pruning in both CALL subqueries and in the final selection is randomized via ORDER BY rand()
+    # NOTE: First/second hop use lowest distance; only final selection is randomized
     qry = f"""
     // Precompute normalized keywords once at top level
     WITH
@@ -99,7 +99,7 @@ def run_query_merged(
       {w1c_expr} AS w1c, {w2c_expr} AS w2c
     MATCH (s:Resource {{id: $startId}})
 
-    // ---------- First hop: s -[r1]- m (global prune to RANDOM $d1) ----------
+    // ---------- First hop: s -[r1]- m (global prune by lowest distance to $d1) ----------
     CALL {{
       WITH s, w1a, w1b, w1c
       MATCH (s)-[r1:REL]-(m:Resource)
@@ -111,14 +111,18 @@ def run_query_merged(
       WHERE ( ($hasA AND a1 IS NOT NULL AND a1 <= $d1)
            OR ($hasB AND b1 IS NOT NULL AND b1 <= $d1)
            OR ($hasC AND c1 IS NOT NULL AND c1 <= $d1) )
-      // random prune instead of lowest distance
-      WITH r1, m, a1, b1, c1
-      ORDER BY rand()
+      // keep lowest distance matches
+      WITH r1, m, a1, b1, c1,
+           CASE WHEN a1 IS NOT NULL AND (b1 IS NULL OR a1 <= b1) AND (c1 IS NULL OR a1 <= c1) THEN a1
+                WHEN b1 IS NOT NULL AND (c1 IS NULL OR b1 <= c1) THEN b1
+                ELSE c1
+           END AS minDist
+      ORDER BY minDist ASC
       LIMIT $d1
       RETURN r1, m, a1, b1, c1
     }}
 
-    // ---------- Second hop: m -[r2]- o (per-m prune to RANDOM $d2) ----------
+    // ---------- Second hop: m -[r2]- o (per-m prune by lowest distance to $d2) ----------
     CALL {{
       WITH m, w2a, w2b, w2c
       MATCH (m)-[r2:REL]-(o:Resource)
@@ -130,9 +134,13 @@ def run_query_merged(
       WHERE ( ($hasA AND a2 IS NOT NULL AND a2 <= $d2)
            OR ($hasB AND b2 IS NOT NULL AND b2 <= $d2)
            OR ($hasC AND c2 IS NOT NULL AND c2 <= $d2) )
-      // random prune instead of lowest distance
-      WITH r2, o, a2, b2, c2
-      ORDER BY rand()
+      // keep lowest distance matches
+      WITH r2, o, a2, b2, c2,
+           CASE WHEN a2 IS NOT NULL AND (b2 IS NULL OR a2 <= b2) AND (c2 IS NULL OR a2 <= c2) THEN a2
+                WHEN b2 IS NOT NULL AND (c2 IS NULL OR b2 <= c2) THEN b2
+                ELSE c2
+           END AS minDist
+      ORDER BY minDist ASC
       LIMIT $d2
       RETURN r2, o, a2, b2, c2
     }}
@@ -153,8 +161,8 @@ def run_query_merged(
 
     // Final selection is also random (not score-ordered)
     RETURN s.id AS s, r1.pred AS p1, m.id AS m, r2.pred AS p2, o.id AS o, scoreA, scoreB, scoreC, score
-    { "ORDER BY rand()" if limit and limit > 0 else "" }
-    { f"LIMIT $limit" if limit and limit > 0 else "" }
+    {"ORDER BY rand()" if limit and limit > 0 else ""}
+    {f"LIMIT $limit" if limit and limit > 0 else ""}
     """
 
     recs, _, _ = driver.execute_query(
@@ -193,7 +201,7 @@ def build_llama_inst_prompt(question: str, evidence: List[dict]) -> str:
 
 
 def extract_answer_list(text: str) -> List[str]:
-    matches = list(re.finditer(r"\\[.*?\\]", text, flags=re.DOTALL))
+    matches = list(re.finditer(r"\[.*?\]", text, flags=re.DOTALL))
     if not matches:
         return []
     candidate = matches[-1].group(0)

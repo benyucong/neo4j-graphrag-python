@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
         "--output-csv", default="random_outputs/random_limit_sweep_metrics.csv", help="Destination CSV file"
     )
     p.add_argument(
-        "--include-timing-percentiles", action="store_true", help="Include p50/p95 timing percentiles"
+        "--include-timing-percentiles", action="store_true", help="Include p50/p90 timing percentiles"
     )
     return p.parse_args()
 
@@ -105,7 +105,7 @@ def evaluate_file(
 ) -> Tuple[MetricResult, int, float, float, Dict[str, float]]:
     """
     Return (metrics, rows, avg_neo4j_ms, avg_llm_ms, timing_percentiles).
-    timing_percentiles contains p50/p95 for neo4j and llm times if requested.
+    timing_percentiles contains p50/p90 for neo4j and llm times if requested.
     """
     total = 0
     exact_match = 0
@@ -195,9 +195,9 @@ def evaluate_file(
     timing_percentiles: Dict[str, float] = {}
     if include_percentiles:
         timing_percentiles["neo4j_p50"] = percentile(neo4j_times, 0.50) if neo4j_times else 0.0
-        timing_percentiles["neo4j_p95"] = percentile(neo4j_times, 0.95) if neo4j_times else 0.0
+        timing_percentiles["neo4j_p90"] = percentile(neo4j_times, 0.90) if neo4j_times else 0.0
         timing_percentiles["llm_p50"] = percentile(llm_times, 0.50) if llm_times else 0.0
-        timing_percentiles["llm_p95"] = percentile(llm_times, 0.95) if llm_times else 0.0
+        timing_percentiles["llm_p90"] = percentile(llm_times, 0.90) if llm_times else 0.0
 
     metrics: MetricResult = {
         "samples": total,
@@ -261,9 +261,9 @@ def main() -> None:
     if args.include_timing_percentiles:
         fieldnames.extend([
             "neo4j_p50_ms",
-            "neo4j_p95_ms",
+            "neo4j_p90_ms",
             "llm_p50_ms",
-            "llm_p95_ms",
+            "llm_p90_ms",
         ])
     
     fieldnames.extend([
@@ -304,9 +304,9 @@ def main() -> None:
             if args.include_timing_percentiles:
                 row.update({
                     "neo4j_p50_ms": round(timing_pcts.get("neo4j_p50", 0.0), 2),
-                    "neo4j_p95_ms": round(timing_pcts.get("neo4j_p95", 0.0), 2),
+                    "neo4j_p90_ms": round(timing_pcts.get("neo4j_p90", 0.0), 2),
                     "llm_p50_ms": round(timing_pcts.get("llm_p50", 0.0), 2),
-                    "llm_p95_ms": round(timing_pcts.get("llm_p95", 0.0), 2),
+                    "llm_p90_ms": round(timing_pcts.get("llm_p90", 0.0), 2),
                 })
             
             writer.writerow(row)

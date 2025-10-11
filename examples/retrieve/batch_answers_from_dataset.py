@@ -263,7 +263,7 @@ def main():
                 if not pairs:
                     items.append({
                         "id": rid, "question": question, "q_entity": q_entity,
-                        "pairs": pairs, "skip_llm": True, "neo4j_time_ms": 0
+                        "pairs": pairs, "skip_llm": True, "neo4j_time_us": 0
                     })
                     done += 1
                     continue
