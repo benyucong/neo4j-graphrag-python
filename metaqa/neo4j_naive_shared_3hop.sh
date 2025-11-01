@@ -16,10 +16,9 @@ conda activate neo4j
 # Configuration (override via env vars if desired)
 NEO4J_HOME=${NEO4J_HOME:-/scratch/cs/adis/yuc10/neo4j-community-5.26.0}
 WORKDIR=${WORKDIR:-/scratch/cs/adis/yuc10/neo4j-graphrag-python}
-# MODEL=${MODEL:-rmanluo/RoG}
 MODEL=${MODEL:-Qwen/Qwen3-4B}
 VLLM_HOST=${VLLM_HOST:-0.0.0.0}
-VLLM_PORT=${VLLM_PORT:-8001}
+VLLM_PORT=${VLLM_PORT:-8006}
 # How many attempts (2s each) to wait for vLLM readiness
 VLLM_WAIT_TRIES=${VLLM_WAIT_TRIES:-500}
 OPENAI_API_BASE=${OPENAI_API_BASE:-http://localhost:${VLLM_PORT}/v1}
@@ -96,19 +95,19 @@ if [[ -f .venv/bin/activate ]]; then
   source .venv/bin/activate
 fi
 
-mkdir -p logs_naive
+mkdir -p logs_naive_shared_3hop
 VLLM_CMD=(python -m vllm.entrypoints.openai.api_server
   --model "$MODEL"
   --host "$VLLM_HOST"
   --port "$VLLM_PORT"
   --dtype auto
-  --download-dir "$HF_HOME"
+  --download-dir "${HF_HOME:-$HOME/.cache/huggingface}"
 )
-if [[ -n "$VLLM_EXTRA_ARGS" ]]; then
+if [[ -n "${VLLM_EXTRA_ARGS:-}" ]]; then
   # shellcheck disable=SC2206
   VLLM_CMD+=($VLLM_EXTRA_ARGS)
 fi
-"${VLLM_CMD[@]}" > logs_naive/vllm.out 2> logs_naive/vllm.err &
+"${VLLM_CMD[@]}" > logs_naive_shared_3hop/vllm.out 2> logs_naive_shared_3hop/vllm.err &
 VLLM_PID=$!
 echo "[info] vLLM started with PID $VLLM_PID" >&2
 
@@ -118,10 +117,10 @@ while true; do
   # If process died, abort early and show logs
   if ! kill -0 "$VLLM_PID" 2>/dev/null; then
   echo "[error] vLLM process exited early (PID $VLLM_PID). Showing recent logs:" >&2
-  echo "--- logs_naive/vllm.err (tail -n 100) ---" >&2
-  tail -n 100 logs_naive/vllm.err >&2 || true
-  echo "--- logs_naive/vllm.out (tail -n 50) ---" >&2
-  tail -n 50 logs_naive/vllm.out >&2 || true
+  echo "--- logs_naive_shared_3hop/vllm.err (tail -n 100) ---" >&2
+  tail -n 100 logs_naive_shared_3hop/vllm.err >&2 || true
+  echo "--- logs_naive_shared_3hop/vllm.out (tail -n 50) ---" >&2
+  tail -n 50 logs_naive_shared_3hop/vllm.out >&2 || true
     exit 1
   fi
   if curl -sf "$OPENAI_API_BASE/models" >/dev/null 2>&1; then
@@ -131,10 +130,10 @@ while true; do
   tries=$((tries+1))
   if [[ "$tries" -ge "$VLLM_WAIT_TRIES" ]]; then
   echo "[error] vLLM did not become ready in time. Showing recent logs:" >&2
-  echo "--- logs_naive/vllm.err (tail -n 100) ---" >&2
-  tail -n 100 logs_naive/vllm.err >&2 || true
-  echo "--- logs_naive/vllm.out (tail -n 50) ---" >&2
-  tail -n 50 logs_naive/vllm.out >&2 || true
+  echo "--- logs_naive_shared_3hop/vllm.err (tail -n 100) ---" >&2
+  tail -n 100 logs_naive_shared_3hop/vllm.err >&2 || true
+  echo "--- logs_naive_shared_3hop/vllm.out (tail -n 50) ---" >&2
+  tail -n 50 logs_naive_shared_3hop/vllm.out >&2 || true
     echo "[hint] If you are using a gated HF model (e.g., Llama 2), ensure HUGGING_FACE_HUB_TOKEN is set." >&2
     echo "[hint] Try an open model, e.g., export MODEL=mistralai/Mistral-7B-Instruct-v0.2" >&2
     exit 1
@@ -142,15 +141,14 @@ while true; do
   sleep 2
 done
 
-echo "[run] Generating answers over dataset via sequential 3-path queries" >&2
-DATASET_PATH=${DATASET_PATH:-datasets/vanilla_paths_joined.jsonl}
-# DATASET_PATH=${DATASET_PATH:-datasets/vanilla_demo.jsonl}
-OUTPUT_PATH=${OUTPUT_PATH:-outputs/answers_merged_naive.jsonl}
+echo "[run] Generating answers over dataset via merged 3-path 3-hop queries (shared distance computation)" >&2
+DATASET_PATH=${DATASET_PATH:-datasets/vanilla_paths_joined_3hop.jsonl}
+OUTPUT_PATH=${OUTPUT_PATH:-outputs/answers_merged_naive_shared_3hop.jsonl}
 mkdir -p "$(dirname "$OUTPUT_PATH")"
-python examples/retrieve/batch_answers_from_dataset_seq.py \
+python examples/retrieve/batch_answers_from_dataset_3hop.py \
   --input "$DATASET_PATH" \
   --output "$OUTPUT_PATH" \
-  --aggregate min --d1 150 --d2 150 --limit 0 --normalize none --topk 100 \
+  --aggregate min --d1 150 --d2 150 --d3 150 --limit 0 --normalize none --topk 100 \
   --max-rows "${BATCH_MAX_ROWS:-0}" \
   --uri "$NEO4J_URI" --user "$NEO4J_USER" --password "$NEO4J_PASSWORD" --database "$NEO4J_DATABASE" \
   --provider vllm --model "$MODEL" --base-url "$OPENAI_API_BASE" --api-key "$OPENAI_API_KEY" \
